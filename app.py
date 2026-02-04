@@ -34,6 +34,31 @@ def dollars(x):
         return "—"
     return f"${x:,.0f}"
 
+def confidence_label(total_n: int) -> str:
+    if total_n >= 30:
+        return "✅ High"
+    if total_n >= 15:
+        return "⚠️ Medium"
+    return "🚧 Low"
+
+def auto_params_for_county(total_n: int) -> tuple[int, int, int]:
+    """
+    Returns (step, tail_min_n, min_bin_n) based on sample size.
+
+    step: increment used to scan thresholds (decision logic)
+    tail_min_n: minimum number of deals in the tail (>= threshold) to trust cliff
+    min_bin_n: minimum deals per bin for the context table
+    """
+    if total_n >= 120:
+        return (5000, 20, 5)
+    if total_n >= 60:
+        return (10000, 15, 4)
+    if total_n >= 30:
+        return (10000, 10, 3)
+    if total_n >= 15:
+        return (15000, 8, 3)
+    return (20000, 6, 2)
+
 def build_bins(df_county: pd.DataFrame, bin_size: int, min_bin_n: int) -> pd.DataFrame:
     """
     Context table only (NOT used for decision thresholds).
@@ -88,8 +113,6 @@ def find_tail_threshold(
     """
     Find LOWEST price P such that among deals with effective_price >= P,
     cut rate >= target_cut_rate AND count >= tail_min_n.
-
-    This captures Davidson-style high-end cliffs even when individual bins are thin.
     """
     d = df_county.copy()
     d["effective_price"] = pd.to_numeric(d["effective_price"], errors="coerce")
@@ -117,15 +140,13 @@ def find_tail_threshold(
 # -----------------------------
 # UI
 # -----------------------------
-st.title("✅ Should We Contract This? — TN (data-driven)")
+st.title("✅ Should We Contract This? — TN (simple)")
 
 st.markdown(
     """
-This tool estimates where deals *stop selling* based on **effective contract price**
-(**Amended Price if present, otherwise Contract Price**).
+Enter the county + contract price and this will tell you **Green / Yellow / Red** based on historical outcomes.
 
-**Important:** the GREEN/YELLOW/RED decision uses *tail cut rate* (all deals priced ≥ P),
-so it doesn’t get tricked by thin high-end bins.
+We use **effective contract price** = (Amended Price if present, else Contract Price).
 """
 )
 
@@ -153,7 +174,7 @@ df = df.dropna(subset=["effective_price"])
 df["is_cut"] = (df["status_norm"] == "cut").astype(int)
 df["is_sold"] = (df["status_norm"] == "sold").astype(int)
 
-# Sidebar controls
+# Sidebar controls (simple)
 st.sidebar.header("Inputs")
 
 market_options = sorted(df["Market"].dropna().unique().tolist())
@@ -171,13 +192,6 @@ use_amended = st.sidebar.checkbox("Use amended price", value=False)
 
 input_price = float(amended_price if use_amended and amended_price > 0 else contract_price)
 
-st.sidebar.header("Tuning (optional)")
-bin_size = st.sidebar.selectbox("Price bin size (table only)", [5000, 10000, 15000, 20000], index=1)
-min_bin_n = st.sidebar.selectbox("Minimum deals per bin (table only)", [3, 5, 8, 10], index=1)
-
-# This is the important one for cliff detection:
-tail_min_n = st.sidebar.selectbox("Minimum deals in tail (decision confidence)", [6, 8, 10, 12, 15, 20], index=3)
-
 # Filter to county
 cdf = df_m[df_m["County"] == county].copy()
 
@@ -185,19 +199,21 @@ total_n = len(cdf)
 sold_n = int(cdf["is_sold"].sum())
 cut_n = int(cdf["is_cut"].sum())
 
-if total_n < 10:
-    st.warning(f"Low sample size for {county} in {market}: only {total_n} deals. Use with caution.")
+# Auto tuning behind the scenes
+step, tail_min_n, min_bin_n = auto_params_for_county(total_n)
 
 # County stats
 avg_sold = cdf.loc[cdf["is_sold"] == 1, "effective_price"].mean()
 
-# Context table bins
-bin_stats = build_bins(cdf, bin_size=bin_size, min_bin_n=min_bin_n)
+# Context table bins (auto)
+bin_stats = build_bins(cdf, bin_size=step, min_bin_n=min_bin_n)
 
-# ✅ Decision thresholds (TAIL-BASED)
-step = bin_size  # re-use your step
+# Decision thresholds (auto)
 line_80 = find_tail_threshold(cdf, 0.80, tail_min_n=tail_min_n, step=step)
 line_90 = find_tail_threshold(cdf, 0.90, tail_min_n=tail_min_n, step=step)
+
+# Confidence badge
+conf = confidence_label(total_n)
 
 # Build "Why"
 reason = []
@@ -212,7 +228,7 @@ if line_90 is not None:
     t90 = cdf[cdf["effective_price"] >= line_90]
     reason.append(f"~90% cut cliff around: {dollars(line_90)}  (Deals ≥ line: {len(t90)}, cut rate: {(t90['is_cut'].mean()*100):.0f}%)")
 
-# Recommendation logic (uses tail thresholds if available)
+# Recommendation logic (use thresholds if available; else fallback)
 if line_90 is not None and input_price >= line_90:
     rec = "🔴 RED — Likely Cut Loose"
 elif line_80 is not None and input_price >= line_80:
@@ -234,6 +250,10 @@ with left:
     st.markdown(f"### {rec}")
     st.write(f"**Input effective price:** {dollars(input_price)}")
     st.write(f"**County sample:** {total_n} deals  |  **Sold:** {sold_n}  |  **Cut Loose:** {cut_n}")
+    st.write(f"**Confidence:** {conf}")
+
+    if conf == "🚧 Low":
+        st.warning("Low data volume in this county. Use this as guidance only; get buyer alignment to confirm price.")
 
     st.markdown("**Why:**")
     if reason:
@@ -252,7 +272,7 @@ with left:
 with right:
     st.subheader("County Cut-Rate by Price Range (context)")
     if bin_stats.empty:
-        st.info("Not enough data to build bins with the current table settings.")
+        st.info("Not enough data to build a context table for this county.")
     else:
         show = bin_stats.copy()
         show["Price Range"] = show.apply(lambda r: f"{dollars(r['bin_low'])}–{dollars(r['bin_high'])}", axis=1)
@@ -272,11 +292,8 @@ with right:
             n = int(match.iloc[0]["n"])
             st.caption(
                 f"Your price falls in a bin with **{int(round(cr*100,0))}%** cut rate "
-                f"over **{n}** deals (bin size: ${bin_size:,})."
+                f"over **{n}** deals."
             )
 
 st.divider()
-st.caption("Tip: The decision uses **tail cut rate**; the right table is just context. If thresholds look jumpy, increase 'Minimum deals in tail'.")
-
-st.divider()
-st.caption("Tip: If a county looks noisy, increase Minimum deals per bin or bin size for more stable thresholds.")
+st.caption("Decision thresholds are auto-tuned per county based on sample size. The table is context only.")
