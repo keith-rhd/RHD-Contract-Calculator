@@ -73,17 +73,50 @@ def build_bins(df_county: pd.DataFrame, bin_size: int, min_bin_n: int) -> pd.Dat
     grp["bin_high"] = pd.to_numeric(grp["bin_high"], errors="coerce")
     return grp[["bin_low", "bin_high", "n", "cut_rate"]]
 
-def find_threshold(bin_stats: pd.DataFrame, target_cut_rate: float) -> float | None:
+def find_high_end_threshold(
+    bin_stats: pd.DataFrame,
+    target_cut_rate: float,
+    require_streak: int = 2,
+) -> float | None:
     """
-    Find the LOWEST bin_low where cut_rate >= target_cut_rate.
-    Return that bin_low as the 'line' (threshold). None if not found.
+    Find the start of the HIGH-END failure zone.
+    We scan from high prices downward and look for a streak of bins
+    where cut_rate >= target_cut_rate. The threshold returned is the
+    LOW edge of the lowest bin in that high-end streak.
+
+    require_streak=2 means it needs 2 bins in a row to qualify (reduces noise).
     """
     if bin_stats.empty:
         return None
-    hits = bin_stats[bin_stats["cut_rate"] >= target_cut_rate]
-    if hits.empty:
+
+    bs = bin_stats.copy()
+    bs["bin_low"] = pd.to_numeric(bs["bin_low"], errors="coerce")
+    bs["bin_high"] = pd.to_numeric(bs["bin_high"], errors="coerce")
+    bs["cut_rate"] = pd.to_numeric(bs["cut_rate"], errors="coerce")
+    bs = bs.dropna(subset=["bin_low", "bin_high", "cut_rate"]).sort_values("bin_low").reset_index(drop=True)
+
+    good = (bs["cut_rate"] >= target_cut_rate).tolist()
+    if not any(good):
         return None
-    return float(hits.iloc[0]["bin_low"])
+
+    # Walk from the top down, looking for a streak of True values
+    streak = 0
+    start_idx = None
+    for i in range(len(bs) - 1, -1, -1):
+        if good[i]:
+            streak += 1
+            start_idx = i
+            if streak >= require_streak:
+                # threshold begins at the low edge of the earliest bin in the streak
+                return float(bs.loc[start_idx, "bin_low"])
+        else:
+            streak = 0
+            start_idx = None
+
+    # If never hit the streak requirement, fall back to the highest bin that qualifies
+    # (still keeps this in the high end, not the low end)
+    idxs = [i for i, v in enumerate(good) if v]
+    return float(bs.loc[max(idxs), "bin_low"])
 
 def dollars(x):
     if x is None or (isinstance(x, float) and math.isnan(x)):
