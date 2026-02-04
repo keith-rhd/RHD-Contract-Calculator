@@ -140,7 +140,7 @@ def find_tail_threshold(
 # -----------------------------
 # UI
 # -----------------------------
-st.title("✅ Should We Contract This? — RHD)
+st.title("✅ Should We Contract This? — RHD")
 
 st.markdown(
     """
