@@ -195,8 +195,8 @@ avg_sold = cdf.loc[cdf["is_sold"] == 1, "effective_price"].mean()
 
 bin_stats = build_bins(cdf, bin_size=bin_size, min_bin_n=min_bin_n)
 
-line_80 = find_threshold(bin_stats, 0.80)
-line_90 = find_threshold(bin_stats, 0.90)
+line_80 = find_high_end_threshold(bin_stats, 0.80, require_streak=2)
+line_90 = find_high_end_threshold(bin_stats, 0.90, require_streak=2)
 
 # Recommendation logic
 # Green: below 80-line (or below avg_sold if no line)
