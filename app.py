@@ -1,8 +1,14 @@
 import math
+import re
 import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Should We Contract This? (TN)", layout="wide")
+
+# =============================
+# CONFIG
+# =============================
+GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1XVrJ1lz-oIf9AjnKtyuzb8PmH9zk2nPy1aZ1VEotubA/edit?gid=0#gid=0"
 
 # -----------------------------
 # Helpers
@@ -16,9 +22,6 @@ def normalize_status(s: str) -> str:
     if s in {"cut loose", "cutloose", "cut"}:
         return "cut"
     return s
-
-def load_data(uploaded_file) -> pd.DataFrame:
-    return pd.read_excel(uploaded_file)
 
 def effective_price_row(row) -> float:
     amended = row.get("Amended Price", None)
@@ -44,7 +47,6 @@ def confidence_label(total_n: int) -> str:
 def auto_params_for_county(total_n: int) -> tuple[int, int, int]:
     """
     Returns (step, tail_min_n, min_bin_n) based on sample size.
-
     step: increment used to scan thresholds (decision logic)
     tail_min_n: minimum number of deals in the tail (>= threshold) to trust cliff
     min_bin_n: minimum deals per bin for the context table
@@ -58,6 +60,28 @@ def auto_params_for_county(total_n: int) -> tuple[int, int, int]:
     if total_n >= 15:
         return (15000, 8, 3)
     return (20000, 6, 2)
+
+def google_sheet_to_csv_url(url: str) -> str:
+    """
+    Convert a standard Google Sheets URL to a CSV export URL.
+    Works with URLs like:
+      https://docs.google.com/spreadsheets/d/<ID>/edit?gid=<GID>#gid=<GID>
+    """
+    m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
+    if not m:
+        raise ValueError("Could not find spreadsheet ID in the URL.")
+    sheet_id = m.group(1)
+
+    gid_match = re.search(r"[?&#]gid=(\d+)", url)
+    gid = gid_match.group(1) if gid_match else "0"
+
+    return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+
+@st.cache_data(ttl=300)  # cache for 5 minutes
+def load_data_from_google_sheet(sheet_url: str) -> pd.DataFrame:
+    csv_url = google_sheet_to_csv_url(sheet_url)
+    # If sharing is not enabled, this will error (403/404)
+    return pd.read_csv(csv_url)
 
 def build_bins(df_county: pd.DataFrame, bin_size: int, min_bin_n: int) -> pd.DataFrame:
     """
@@ -104,12 +128,7 @@ def build_bins(df_county: pd.DataFrame, bin_size: int, min_bin_n: int) -> pd.Dat
 
     return grp[["bin_low", "bin_high", "n", "cut_rate"]]
 
-def find_tail_threshold(
-    df_county: pd.DataFrame,
-    target_cut_rate: float,
-    tail_min_n: int,
-    step: int,
-) -> float | None:
+def find_tail_threshold(df_county: pd.DataFrame, target_cut_rate: float, tail_min_n: int, step: int) -> float | None:
     """
     Find LOWEST price P such that among deals with effective_price >= P,
     cut rate >= target_cut_rate AND count >= tail_min_n.
@@ -140,27 +159,42 @@ def find_tail_threshold(
 # -----------------------------
 # UI
 # -----------------------------
-st.title("✅ Should We Contract This? — RHD")
+st.title("✅ Should We Contract This? — TN (simple)")
 
 st.markdown(
     """
-Enter the county + contract price and this will tell you **Green / Yellow / Red** based on historical outcomes.
+This app pulls directly from your Google Sheet and outputs **Green / Yellow / Red**.
+
+- It uses **effective contract price** = (Amended Price if present, else Contract Price) *behind the scenes*.
+- Acquisitions only enters: **Proposed Contract Price**.
 """
 )
 
-uploaded = st.file_uploader("Upload your Excel file (Properties Sold In TN.xlsx)", type=["xlsx"])
-if not uploaded:
-    st.info("Upload the Excel file to begin.")
+# Quick refresh button
+col_a, col_b = st.columns([1, 3])
+with col_a:
+    if st.button("🔄 Refresh data"):
+        load_data_from_google_sheet.clear()  # clears cache
+
+# Load sheet
+try:
+    df_raw = load_data_from_google_sheet(GOOGLE_SHEET_URL)
+except Exception as e:
+    st.error(
+        "Couldn't load the Google Sheet. Most common cause: the sheet isn't shared as "
+        "**Anyone with the link can view**.\n\n"
+        f"Details: {e}"
+    )
     st.stop()
 
-df_raw = load_data(uploaded)
-
+# Validate columns
 required_cols = ["County", "Status", "Contract Price", "Amended Price", "Market"]
 missing = [c for c in required_cols if c not in df_raw.columns]
 if missing:
-    st.error(f"Your file is missing these required columns: {missing}")
+    st.error(f"Your sheet is missing these required columns: {missing}")
     st.stop()
 
+# Prep dataframe
 df = df_raw.copy()
 df["status_norm"] = df["Status"].apply(normalize_status)
 df = df[df["status_norm"].isin(["sold", "cut"])].copy()
@@ -184,7 +218,7 @@ df_m = df[df["Market"] == market].copy()
 county_options = sorted(df_m["County"].dropna().unique().tolist())
 county = st.sidebar.selectbox("County", county_options)
 
-contract_price = st.sidebar.number_input("Contract Price ($)", min_value=0, value=150000, step=5000)
+contract_price = st.sidebar.number_input("Proposed Contract Price ($)", min_value=0, value=150000, step=5000)
 input_price = float(contract_price)
 
 # Filter to county
@@ -200,14 +234,13 @@ step, tail_min_n, min_bin_n = auto_params_for_county(total_n)
 # County stats
 avg_sold = cdf.loc[cdf["is_sold"] == 1, "effective_price"].mean()
 
-# Context table bins (auto)
+# Context table (auto)
 bin_stats = build_bins(cdf, bin_size=step, min_bin_n=min_bin_n)
 
 # Decision thresholds (auto)
 line_80 = find_tail_threshold(cdf, 0.80, tail_min_n=tail_min_n, step=step)
 line_90 = find_tail_threshold(cdf, 0.90, tail_min_n=tail_min_n, step=step)
 
-# Confidence badge
 conf = confidence_label(total_n)
 
 # Build "Why"
@@ -217,13 +250,13 @@ if not math.isnan(avg_sold):
 
 if line_80 is not None:
     t80 = cdf[cdf["effective_price"] >= line_80]
-    reason.append(f"~80% cut cliff around: {dollars(line_80)}  (Deals ≥ line: {len(t80)}, cut rate: {(t80['is_cut'].mean()*100):.0f}%)")
+    reason.append(f"~80% cut cliff around: {dollars(line_80)} (Deals ≥ line: {len(t80)}, cut rate: {(t80['is_cut'].mean()*100):.0f}%)")
 
 if line_90 is not None:
     t90 = cdf[cdf["effective_price"] >= line_90]
-    reason.append(f"~90% cut cliff around: {dollars(line_90)}  (Deals ≥ line: {len(t90)}, cut rate: {(t90['is_cut'].mean()*100):.0f}%)")
+    reason.append(f"~90% cut cliff around: {dollars(line_90)} (Deals ≥ line: {len(t90)}, cut rate: {(t90['is_cut'].mean()*100):.0f}%)")
 
-# Recommendation logic (use thresholds if available; else fallback)
+# Recommendation logic
 if line_90 is not None and input_price >= line_90:
     rec = "🔴 RED — Likely Cut Loose"
 elif line_80 is not None and input_price >= line_80:
@@ -243,12 +276,12 @@ left, right = st.columns([1.1, 1])
 with left:
     st.subheader("Decision")
     st.markdown(f"### {rec}")
-    st.write(f"**Input effective price:** {dollars(input_price)}")
+    st.write(f"**Input contract price:** {dollars(input_price)}")
     st.write(f"**County sample:** {total_n} deals  |  **Sold:** {sold_n}  |  **Cut Loose:** {cut_n}")
     st.write(f"**Confidence:** {conf}")
 
     if conf == "🚧 Low":
-        st.warning("Low data volume in this county. Use this as guidance only; get buyer alignment to confirm price.")
+        st.warning("Low data volume in this county. Use as guidance only; get buyer alignment to confirm pricing.")
 
     st.markdown("**Why:**")
     if reason:
@@ -260,12 +293,12 @@ with left:
     if line_90 is not None and input_price >= line_90:
         st.error("This is in the **90%+ cut zone** for this county. Strongly avoid unless the deal is exceptional.")
     elif line_80 is not None and input_price >= line_80:
-        st.warning("This is in the **80% cut zone**. Only sign with clear justification (condition/location/buyer alignment).")
+        st.warning("This is in the **80% cut zone**. Only sign with clear justification.")
     else:
         st.success("This price is *not* in the high-failure zone based on your historical outcomes.")
 
 with right:
-    st.subheader("County Cut-Rate by Price Range (context)")
+    st.subheader("Cut-Rate by Price Range (context)")
     if bin_stats.empty:
         st.info("Not enough data to build a context table for this county.")
     else:
@@ -275,19 +308,9 @@ with right:
         show = show[["Price Range", "n", "Cut Rate"]].rename(columns={"n": "Deals in bin"})
         st.dataframe(show, use_container_width=True)
 
-        # Highlight where the input falls
-        bs = bin_stats.copy()
-        bs["bin_low"] = pd.to_numeric(bs["bin_low"], errors="coerce")
-        bs["bin_high"] = pd.to_numeric(bs["bin_high"], errors="coerce")
-        bs = bs.dropna(subset=["bin_low", "bin_high"])
+st.divider()
+st.caption("Data refreshes automatically every ~5 minutes (or click Refresh).")
 
-        match = bs[(bs["bin_low"] < input_price) & (input_price <= bs["bin_high"])]
-        if not match.empty:
-            cr = float(match.iloc[0]["cut_rate"])
-            n = int(match.iloc[0]["n"])
-            st.caption(
-                f"Your price falls in a bin with **{int(round(cr*100,0))}%** cut rate "
-                f"over **{n}** deals."
             )
 
 st.divider()
