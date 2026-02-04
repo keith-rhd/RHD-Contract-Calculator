@@ -156,15 +156,11 @@ def find_tail_threshold(df_county: pd.DataFrame, target_cut_rate: float, tail_mi
 # -----------------------------
 # UI
 # -----------------------------
-st.title("✅ Should We Contract This? — TN (simple)")
+st.title("✅ Should We Contract This? — RHD")
 
 st.markdown(
     """
-This app pulls directly from your Google Sheet and outputs **Green / Yellow / Red**.
-
-- It uses **effective contract price** = (Amended Price if present, else Contract Price) *behind the scenes*.
-- Acquisitions only enters: **Proposed Contract Price**.
-- **Market is ignored** — all deals in the selected county are counted together.
+This app pulls directly from all sold and cut RHD deals and outputs **Green / Yellow / Red**.
 """
 )
 
