@@ -73,6 +73,43 @@ def build_bins(df_county: pd.DataFrame, bin_size: int, min_bin_n: int) -> pd.Dat
     grp["bin_high"] = pd.to_numeric(grp["bin_high"], errors="coerce")
     return grp[["bin_low", "bin_high", "n", "cut_rate"]]
 
+def find_tail_threshold(
+    df_county: pd.DataFrame,
+    target_cut_rate: float,
+    tail_min_n: int = 12,
+    step: int = 5000,
+) -> float | None:
+    """
+    Find the LOWEST price P such that among deals with effective_price >= P,
+    the cut rate is >= target_cut_rate, with at least tail_min_n deals in that tail.
+
+    - step controls how granular P is (rounds to $5k, $10k, etc.)
+    """
+    d = df_county.dropna(subset=["effective_price", "is_cut"]).copy()
+    if d.empty:
+        return None
+
+    # We'll test thresholds on rounded "grid" prices
+    prices = d["effective_price"].astype(float)
+    pmin, pmax = prices.min(), prices.max()
+
+    start = int((pmin // step) * step)
+    end = int(((pmax + step - 1) // step) * step)
+
+    best = None
+    for P in range(start, end + step, step):
+        tail = d[d["effective_price"] >= P]
+        n = len(tail)
+        if n < tail_min_n:
+            continue
+        cut_rate = tail["is_cut"].mean()
+        if cut_rate >= target_cut_rate:
+            best = P
+            break
+
+    return float(best) if best is not None else None
+
+
 def find_high_end_threshold(
     bin_stats: pd.DataFrame,
     target_cut_rate: float,
