@@ -18,10 +18,7 @@ def normalize_status(s: str) -> str:
     return s
 
 def load_data(uploaded_file) -> pd.DataFrame:
-    df = pd.read_excel(uploaded_file)
-    # Expect these columns from your sheet:
-    # Address, City, County, Status, Contract Price, Amended Price, Market, Date (optional)
-    return df
+    return pd.read_excel(uploaded_file)
 
 def effective_price_row(row) -> float:
     amended = row.get("Amended Price", None)
@@ -32,26 +29,32 @@ def effective_price_row(row) -> float:
         return float(contract)
     return float("nan")
 
+def dollars(x):
+    if x is None or (isinstance(x, float) and math.isnan(x)):
+        return "—"
+    return f"${x:,.0f}"
+
 def build_bins(df_county: pd.DataFrame, bin_size: int, min_bin_n: int) -> pd.DataFrame:
     """
-    Build $-increment bins and compute cut rate per bin.
-    Returns a dataframe with: bin_low, bin_high, n, cut_rate
+    Context table only (NOT used for decision thresholds).
+    Returns: bin_low, bin_high, n, cut_rate
     """
-    prices = df_county["effective_price"].dropna()
+    prices = pd.to_numeric(df_county["effective_price"], errors="coerce").dropna()
     if prices.empty:
         return pd.DataFrame(columns=["bin_low", "bin_high", "n", "cut_rate"])
 
-    pmin, pmax = prices.min(), prices.max()
-    # Round to bin edges
+    pmin, pmax = float(prices.min()), float(prices.max())
     start = int(math.floor(pmin / bin_size) * bin_size)
     end = int(math.ceil(pmax / bin_size) * bin_size)
 
     bins = list(range(start, end + bin_size, bin_size))
     if len(bins) < 3:
-        # too little spread; just one bin
         bins = [start, end + bin_size]
 
     df = df_county.copy()
+    df["effective_price"] = pd.to_numeric(df["effective_price"], errors="coerce")
+    df = df.dropna(subset=["effective_price"])
+
     df["price_bin"] = pd.cut(df["effective_price"], bins=bins, right=True, include_lowest=True)
 
     grp = (
@@ -63,102 +66,53 @@ def build_bins(df_county: pd.DataFrame, bin_size: int, min_bin_n: int) -> pd.Dat
         .reset_index()
     )
 
-    # Pull numeric edges from Interval
     grp["bin_low"] = grp["price_bin"].apply(lambda x: float(x.left) if pd.notna(x) else float("nan"))
     grp["bin_high"] = grp["price_bin"].apply(lambda x: float(x.right) if pd.notna(x) else float("nan"))
 
-    grp = grp[grp["n"] >= min_bin_n].copy()
-    grp = grp.sort_values(["bin_low"]).reset_index(drop=True)
     grp["bin_low"] = pd.to_numeric(grp["bin_low"], errors="coerce")
     grp["bin_high"] = pd.to_numeric(grp["bin_high"], errors="coerce")
+    grp["cut_rate"] = pd.to_numeric(grp["cut_rate"], errors="coerce")
+    grp = grp.dropna(subset=["bin_low", "bin_high", "cut_rate"])
+
+    grp = grp[grp["n"] >= min_bin_n].copy()
+    grp = grp.sort_values(["bin_low"]).reset_index(drop=True)
+
     return grp[["bin_low", "bin_high", "n", "cut_rate"]]
 
 def find_tail_threshold(
     df_county: pd.DataFrame,
     target_cut_rate: float,
-    tail_min_n: int = 12,
-    step: int = 5000,
+    tail_min_n: int,
+    step: int,
 ) -> float | None:
     """
-    Find the LOWEST price P such that among deals with effective_price >= P,
-    the cut rate is >= target_cut_rate, with at least tail_min_n deals in that tail.
+    Find LOWEST price P such that among deals with effective_price >= P,
+    cut rate >= target_cut_rate AND count >= tail_min_n.
 
-    - step controls how granular P is (rounds to $5k, $10k, etc.)
+    This captures Davidson-style high-end cliffs even when individual bins are thin.
     """
-    d = df_county.dropna(subset=["effective_price", "is_cut"]).copy()
+    d = df_county.copy()
+    d["effective_price"] = pd.to_numeric(d["effective_price"], errors="coerce")
+    d = d.dropna(subset=["effective_price", "is_cut"])
     if d.empty:
         return None
 
-    # We'll test thresholds on rounded "grid" prices
     prices = d["effective_price"].astype(float)
-    pmin, pmax = prices.min(), prices.max()
+    pmin, pmax = float(prices.min()), float(prices.max())
 
     start = int((pmin // step) * step)
     end = int(((pmax + step - 1) // step) * step)
 
-    best = None
     for P in range(start, end + step, step):
         tail = d[d["effective_price"] >= P]
         n = len(tail)
         if n < tail_min_n:
             continue
-        cut_rate = tail["is_cut"].mean()
+        cut_rate = float(tail["is_cut"].mean())
         if cut_rate >= target_cut_rate:
-            best = P
-            break
+            return float(P)
 
-    return float(best) if best is not None else None
-
-
-def find_high_end_threshold(
-    bin_stats: pd.DataFrame,
-    target_cut_rate: float,
-    require_streak: int = 2,
-) -> float | None:
-    """
-    Find the start of the HIGH-END failure zone.
-    We scan from high prices downward and look for a streak of bins
-    where cut_rate >= target_cut_rate. The threshold returned is the
-    LOW edge of the lowest bin in that high-end streak.
-
-    require_streak=2 means it needs 2 bins in a row to qualify (reduces noise).
-    """
-    if bin_stats.empty:
-        return None
-
-    bs = bin_stats.copy()
-    bs["bin_low"] = pd.to_numeric(bs["bin_low"], errors="coerce")
-    bs["bin_high"] = pd.to_numeric(bs["bin_high"], errors="coerce")
-    bs["cut_rate"] = pd.to_numeric(bs["cut_rate"], errors="coerce")
-    bs = bs.dropna(subset=["bin_low", "bin_high", "cut_rate"]).sort_values("bin_low").reset_index(drop=True)
-
-    good = (bs["cut_rate"] >= target_cut_rate).tolist()
-    if not any(good):
-        return None
-
-    # Walk from the top down, looking for a streak of True values
-    streak = 0
-    start_idx = None
-    for i in range(len(bs) - 1, -1, -1):
-        if good[i]:
-            streak += 1
-            start_idx = i
-            if streak >= require_streak:
-                # threshold begins at the low edge of the earliest bin in the streak
-                return float(bs.loc[start_idx, "bin_low"])
-        else:
-            streak = 0
-            start_idx = None
-
-    # If never hit the streak requirement, fall back to the highest bin that qualifies
-    # (still keeps this in the high end, not the low end)
-    idxs = [i for i, v in enumerate(good) if v]
-    return float(bs.loc[max(idxs), "bin_low"])
-
-def dollars(x):
-    if x is None or (isinstance(x, float) and math.isnan(x)):
-        return "—"
-    return f"${x:,.0f}"
+    return None
 
 # -----------------------------
 # UI
@@ -167,13 +121,15 @@ st.title("✅ Should We Contract This? — TN (data-driven)")
 
 st.markdown(
     """
-This tool uses your historical outcomes to estimate where deals *stop selling* based on **effective contract price**
+This tool estimates where deals *stop selling* based on **effective contract price**
 (**Amended Price if present, otherwise Contract Price**).
+
+**Important:** the GREEN/YELLOW/RED decision uses *tail cut rate* (all deals priced ≥ P),
+so it doesn’t get tricked by thin high-end bins.
 """
 )
 
 uploaded = st.file_uploader("Upload your Excel file (Properties Sold In TN.xlsx)", type=["xlsx"])
-
 if not uploaded:
     st.info("Upload the Excel file to begin.")
     st.stop()
@@ -191,7 +147,8 @@ df["status_norm"] = df["Status"].apply(normalize_status)
 df = df[df["status_norm"].isin(["sold", "cut"])].copy()
 
 df["effective_price"] = df.apply(effective_price_row, axis=1)
-df = df[pd.notna(df["effective_price"])].copy()
+df["effective_price"] = pd.to_numeric(df["effective_price"], errors="coerce")
+df = df.dropna(subset=["effective_price"])
 
 df["is_cut"] = (df["status_norm"] == "cut").astype(int)
 df["is_sold"] = (df["status_norm"] == "sold").astype(int)
@@ -200,7 +157,8 @@ df["is_sold"] = (df["status_norm"] == "sold").astype(int)
 st.sidebar.header("Inputs")
 
 market_options = sorted(df["Market"].dropna().unique().tolist())
-market = st.sidebar.selectbox("Market", market_options, index=market_options.index("Nashville/Middle TN") if "Nashville/Middle TN" in market_options else 0)
+default_market_idx = market_options.index("Nashville/Middle TN") if "Nashville/Middle TN" in market_options else 0
+market = st.sidebar.selectbox("Market", market_options, index=default_market_idx)
 
 df_m = df[df["Market"] == market].copy()
 
@@ -211,11 +169,14 @@ contract_price = st.sidebar.number_input("Contract Price ($)", min_value=0, valu
 amended_price = st.sidebar.number_input("Amended Price ($) (optional)", min_value=0, value=0, step=5000)
 use_amended = st.sidebar.checkbox("Use amended price", value=False)
 
-input_price = amended_price if use_amended and amended_price > 0 else contract_price
+input_price = float(amended_price if use_amended and amended_price > 0 else contract_price)
 
 st.sidebar.header("Tuning (optional)")
-bin_size = st.sidebar.selectbox("Price bin size", [5000, 10000, 15000, 20000], index=1)
-min_bin_n = st.sidebar.selectbox("Minimum deals per bin (stability)", [3, 5, 8, 10], index=1)
+bin_size = st.sidebar.selectbox("Price bin size (table only)", [5000, 10000, 15000, 20000], index=1)
+min_bin_n = st.sidebar.selectbox("Minimum deals per bin (table only)", [3, 5, 8, 10], index=1)
+
+# This is the important one for cliff detection:
+tail_min_n = st.sidebar.selectbox("Minimum deals in tail (decision confidence)", [6, 8, 10, 12, 15, 20], index=3)
 
 # Filter to county
 cdf = df_m[df_m["County"] == county].copy()
@@ -230,41 +191,40 @@ if total_n < 10:
 # County stats
 avg_sold = cdf.loc[cdf["is_sold"] == 1, "effective_price"].mean()
 
+# Context table bins
 bin_stats = build_bins(cdf, bin_size=bin_size, min_bin_n=min_bin_n)
 
-# Tail-based thresholds (robust for counties with lots of data like Davidson)
-tail_min_n = 12  # you can expose this in tuning if you want
-step = bin_size  # reuse your selected bin_size as step size
-
+# ✅ Decision thresholds (TAIL-BASED)
+step = bin_size  # re-use your step
 line_80 = find_tail_threshold(cdf, 0.80, tail_min_n=tail_min_n, step=step)
 line_90 = find_tail_threshold(cdf, 0.90, tail_min_n=tail_min_n, step=step)
 
-
-# Recommendation logic
-# Green: below 80-line (or below avg_sold if no line)
-# Yellow: between 80 and 90 (or moderately above avg_sold)
-# Red: at/above 90-line (or way above avg_sold)
-rec = "UNKNOWN"
+# Build "Why"
 reason = []
-
 if not math.isnan(avg_sold):
     reason.append(f"Avg SOLD effective price: {dollars(avg_sold)}")
 
 if line_80 is not None:
-    reason.append(f"~80% cut-rate starts around: {dollars(line_80)}")
+    t80 = cdf[cdf["effective_price"] >= line_80]
+    reason.append(f"~80% cut cliff around: {dollars(line_80)}  (Deals ≥ line: {len(t80)}, cut rate: {(t80['is_cut'].mean()*100):.0f}%)")
+
 if line_90 is not None:
-    reason.append(f"~90% cut-rate starts around: {dollars(line_90)}")
+    t90 = cdf[cdf["effective_price"] >= line_90]
+    reason.append(f"~90% cut cliff around: {dollars(line_90)}  (Deals ≥ line: {len(t90)}, cut rate: {(t90['is_cut'].mean()*100):.0f}%)")
 
-# Determine bands (fallbacks if thresholds missing)
-green_cap = line_80 if line_80 is not None else avg_sold * 1.10 if not math.isnan(avg_sold) else None
-red_floor = line_90 if line_90 is not None else avg_sold * 1.35 if not math.isnan(avg_sold) else None
-
-if green_cap is not None and input_price <= green_cap:
-    rec = "🟢 GREEN — Contractable"
-elif red_floor is not None and input_price >= red_floor:
+# Recommendation logic (uses tail thresholds if available)
+if line_90 is not None and input_price >= line_90:
     rec = "🔴 RED — Likely Cut Loose"
-else:
+elif line_80 is not None and input_price >= line_80:
     rec = "🟡 YELLOW — Caution / Needs justification"
+else:
+    # fallback only when we can't compute cliffs
+    if not math.isnan(avg_sold) and input_price <= avg_sold * 1.10:
+        rec = "🟢 GREEN — Contractable"
+    elif not math.isnan(avg_sold) and input_price >= avg_sold * 1.35:
+        rec = "🔴 RED — Likely Cut Loose"
+    else:
+        rec = "🟡 YELLOW — Caution / Needs justification"
 
 # Layout
 left, right = st.columns([1.1, 1])
@@ -276,21 +236,23 @@ with left:
     st.write(f"**County sample:** {total_n} deals  |  **Sold:** {sold_n}  |  **Cut Loose:** {cut_n}")
 
     st.markdown("**Why:**")
-    for r in reason:
-        st.write(f"- {r}")
+    if reason:
+        for r in reason:
+            st.write(f"- {r}")
+    else:
+        st.write("- Not enough data to compute thresholds.")
 
-    # Simple coaching line
     if line_90 is not None and input_price >= line_90:
-        st.error("This is in the **90%+ cut zone** for this county. You’re very likely to waste time unless the deal is exceptional.")
+        st.error("This is in the **90%+ cut zone** for this county. Strongly avoid unless the deal is exceptional.")
     elif line_80 is not None and input_price >= line_80:
-        st.warning("This is in the **80% cut zone**. Only sign if the property quality/location is clearly above-average or you have buyer alignment.")
+        st.warning("This is in the **80% cut zone**. Only sign with clear justification (condition/location/buyer alignment).")
     else:
         st.success("This price is *not* in the high-failure zone based on your historical outcomes.")
 
 with right:
-    st.subheader("County Cut-Rate by Price Range")
+    st.subheader("County Cut-Rate by Price Range (context)")
     if bin_stats.empty:
-        st.info("Not enough data to build bins with the current settings.")
+        st.info("Not enough data to build bins with the current table settings.")
     else:
         show = bin_stats.copy()
         show["Price Range"] = show.apply(lambda r: f"{dollars(r['bin_low'])}–{dollars(r['bin_high'])}", axis=1)
@@ -298,27 +260,23 @@ with right:
         show = show[["Price Range", "n", "Cut Rate"]].rename(columns={"n": "Deals in bin"})
         st.dataframe(show, use_container_width=True)
 
-        # Highlight where the input falls (safe numeric comparisons)
-        if not bin_stats.empty:
-            bs = bin_stats.copy()
-        
-            # Force numeric dtypes (fixes occasional categorical/object weirdness)
-            bs["bin_low"] = pd.to_numeric(bs["bin_low"], errors="coerce")
-            bs["bin_high"] = pd.to_numeric(bs["bin_high"], errors="coerce")
-            ip = float(input_price)
-        
-            bs = bs.dropna(subset=["bin_low", "bin_high"])
-        
-            match = bs[(bs["bin_low"] < ip) & (ip <= bs["bin_high"])]
-        
-            if not match.empty:
-                cr = float(match.iloc[0]["cut_rate"])
-                n = int(match.iloc[0]["n"])
-                st.caption(
-                    f"Your price falls in a bin with **{int(round(cr*100,0))}%** cut rate "
-                    f"over **{n}** deals (bin size: ${bin_size:,})."
-        )
+        # Highlight where the input falls
+        bs = bin_stats.copy()
+        bs["bin_low"] = pd.to_numeric(bs["bin_low"], errors="coerce")
+        bs["bin_high"] = pd.to_numeric(bs["bin_high"], errors="coerce")
+        bs = bs.dropna(subset=["bin_low", "bin_high"])
 
+        match = bs[(bs["bin_low"] < input_price) & (input_price <= bs["bin_high"])]
+        if not match.empty:
+            cr = float(match.iloc[0]["cut_rate"])
+            n = int(match.iloc[0]["n"])
+            st.caption(
+                f"Your price falls in a bin with **{int(round(cr*100,0))}%** cut rate "
+                f"over **{n}** deals (bin size: ${bin_size:,})."
+            )
+
+st.divider()
+st.caption("Tip: The decision uses **tail cut rate**; the right table is just context. If thresholds look jumpy, increase 'Minimum deals in tail'.")
 
 st.divider()
 st.caption("Tip: If a county looks noisy, increase Minimum deals per bin or bin size for more stable thresholds.")
