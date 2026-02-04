@@ -145,8 +145,6 @@ st.title("✅ Should We Contract This? — TN (simple)")
 st.markdown(
     """
 Enter the county + contract price and this will tell you **Green / Yellow / Red** based on historical outcomes.
-
-We use **effective contract price** = (Amended Price if present, else Contract Price).
 """
 )
 
