@@ -69,6 +69,8 @@ def build_bins(df_county: pd.DataFrame, bin_size: int, min_bin_n: int) -> pd.Dat
 
     grp = grp[grp["n"] >= min_bin_n].copy()
     grp = grp.sort_values(["bin_low"]).reset_index(drop=True)
+    grp["bin_low"] = pd.to_numeric(grp["bin_low"], errors="coerce")
+    grp["bin_high"] = pd.to_numeric(grp["bin_high"], errors="coerce")
     return grp[["bin_low", "bin_high", "n", "cut_rate"]]
 
 def find_threshold(bin_stats: pd.DataFrame, target_cut_rate: float) -> float | None:
@@ -221,12 +223,27 @@ with right:
         show = show[["Price Range", "n", "Cut Rate"]].rename(columns={"n": "Deals in bin"})
         st.dataframe(show, use_container_width=True)
 
-        # Highlight where the input falls
-        match = bin_stats[(bin_stats["bin_low"] < input_price) & (input_price <= bin_stats["bin_high"])]
-        if not match.empty:
-            cr = float(match.iloc[0]["cut_rate"])
-            n = int(match.iloc[0]["n"])
-            st.caption(f"Your price falls in a bin with **{int(round(cr*100,0))}%** cut rate over **{n}** deals (bin size: ${bin_size:,}).")
+        # Highlight where the input falls (safe numeric comparisons)
+        if not bin_stats.empty:
+            bs = bin_stats.copy()
+        
+            # Force numeric dtypes (fixes occasional categorical/object weirdness)
+            bs["bin_low"] = pd.to_numeric(bs["bin_low"], errors="coerce")
+            bs["bin_high"] = pd.to_numeric(bs["bin_high"], errors="coerce")
+            ip = float(input_price)
+        
+            bs = bs.dropna(subset=["bin_low", "bin_high"])
+        
+            match = bs[(bs["bin_low"] < ip) & (ip <= bs["bin_high"])]
+        
+            if not match.empty:
+                cr = float(match.iloc[0]["cut_rate"])
+                n = int(match.iloc[0]["n"])
+                st.caption(
+                    f"Your price falls in a bin with **{int(round(cr*100,0))}%** cut rate "
+                    f"over **{n}** deals (bin size: ${bin_size:,})."
+        )
+
 
 st.divider()
 st.caption("Tip: If a county looks noisy, increase Minimum deals per bin or bin size for more stable thresholds.")
