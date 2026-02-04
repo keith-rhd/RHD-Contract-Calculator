@@ -310,8 +310,3 @@ with right:
 
 st.divider()
 st.caption("Data refreshes automatically every ~5 minutes (or click Refresh).")
-
-            )
-
-st.divider()
-st.caption("Decision thresholds are auto-tuned per county based on sample size. The table is context only.")
