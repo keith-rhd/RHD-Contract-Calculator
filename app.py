@@ -53,11 +53,6 @@ def auto_params_for_county(total_n: int) -> tuple[int, int, int]:
     return (20000, 6, 2)
 
 def google_sheet_to_csv_url(url: str) -> str:
-    """
-    Convert a standard Google Sheets URL to a CSV export URL.
-    Works with URLs like:
-      https://docs.google.com/spreadsheets/d/<ID>/edit?gid=<GID>#gid=<GID>
-    """
     m = re.search(r"/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
     if not m:
         raise ValueError("Could not find spreadsheet ID in the URL.")
@@ -71,7 +66,6 @@ def google_sheet_to_csv_url(url: str) -> str:
 @st.cache_data(ttl=300)  # cache for 5 minutes
 def load_data_from_google_sheet(sheet_url: str) -> pd.DataFrame:
     csv_url = google_sheet_to_csv_url(sheet_url)
-    # If sharing is not enabled, this will error (403/404)
     return pd.read_csv(csv_url)
 
 def clean_money_series(s: pd.Series) -> pd.Series:
@@ -81,8 +75,8 @@ def clean_money_series(s: pd.Series) -> pd.Series:
     """
     return pd.to_numeric(
         s.astype(str)
-        .str.replace(r"[\$,]", "", regex=True)   # remove $ and commas
-        .str.replace(r"\s+", "", regex=True),    # remove whitespace
+        .str.replace(r"[\$,]", "", regex=True)
+        .str.replace(r"\s+", "", regex=True),
         errors="coerce",
     )
 
@@ -162,11 +156,15 @@ def find_tail_threshold(df_county: pd.DataFrame, target_cut_rate: float, tail_mi
 # -----------------------------
 # UI
 # -----------------------------
-st.title("✅ Should We Contract This? — RHD")
+st.title("✅ Should We Contract This? — TN (simple)")
 
 st.markdown(
     """
-This app pulls directly from every sold or cut RHD deal and outputs **Green / Yellow / Red**.
+This app pulls directly from your Google Sheet and outputs **Green / Yellow / Red**.
+
+- It uses **effective contract price** = (Amended Price if present, else Contract Price) *behind the scenes*.
+- Acquisitions only enters: **Proposed Contract Price**.
+- **Market is ignored** — all deals in the selected county are counted together.
 """
 )
 
@@ -188,22 +186,22 @@ except Exception as e:
     st.stop()
 
 # Validate columns
-required_cols = ["County", "Status", "Contract Price", "Amended Price", "Market"]
+required_cols = ["County", "Status", "Contract Price", "Amended Price"]
 missing = [c for c in required_cols if c not in df_raw.columns]
 if missing:
     st.error(f"Your sheet is missing these required columns: {missing}")
     st.stop()
 
 # -----------------------------
-# Prep dataframe (IMPORTANT FIX)
+# Prep dataframe
 # -----------------------------
 df = df_raw.copy()
 
-# Normalize status and filter to Sold / Cut Loose only
+# Normalize status and keep Sold / Cut Loose only
 df["status_norm"] = df["Status"].apply(normalize_status)
 df = df[df["status_norm"].isin(["sold", "cut"])].copy()
 
-# Clean currency columns coming from Google Sheets
+# Clean currency columns
 df["Contract Price"] = clean_money_series(df["Contract Price"])
 df["Amended Price"] = clean_money_series(df["Amended Price"])
 
@@ -220,20 +218,14 @@ df["is_sold"] = (df["status_norm"] == "sold").astype(int)
 # Sidebar controls (simple)
 st.sidebar.header("Inputs")
 
-market_options = sorted(df["Market"].dropna().unique().tolist())
-default_market_idx = market_options.index("Nashville/Middle TN") if "Nashville/Middle TN" in market_options else 0
-market = st.sidebar.selectbox("Market", market_options, index=default_market_idx)
-
-df_m = df[df["Market"] == market].copy()
-
-county_options = sorted(df_m["County"].dropna().unique().tolist())
+county_options = sorted(df["County"].dropna().unique().tolist())
 county = st.sidebar.selectbox("County", county_options)
 
 contract_price = st.sidebar.number_input("Proposed Contract Price ($)", min_value=0, value=150000, step=5000)
 input_price = float(contract_price)
 
-# Filter to county
-cdf = df_m[df_m["County"] == county].copy()
+# Filter to county (NO market filter)
+cdf = df[df["County"] == county].copy()
 
 total_n = len(cdf)
 sold_n = int(cdf["is_sold"].sum())
