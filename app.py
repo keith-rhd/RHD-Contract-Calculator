@@ -187,10 +187,7 @@ county_options = sorted(df_m["County"].dropna().unique().tolist())
 county = st.sidebar.selectbox("County", county_options)
 
 contract_price = st.sidebar.number_input("Contract Price ($)", min_value=0, value=150000, step=5000)
-amended_price = st.sidebar.number_input("Amended Price ($) (optional)", min_value=0, value=0, step=5000)
-use_amended = st.sidebar.checkbox("Use amended price", value=False)
-
-input_price = float(amended_price if use_amended and amended_price > 0 else contract_price)
+input_price = float(contract_price)
 
 # Filter to county
 cdf = df_m[df_m["County"] == county].copy()
