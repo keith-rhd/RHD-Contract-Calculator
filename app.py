@@ -160,7 +160,7 @@ st.title("✅ Should We Contract This? — RHD")
 
 st.markdown(
     """
-This app pulls directly from all sold and cut RHD deals and outputs **Green / Yellow / Red**.
+This app pulls directly from all sold and cut RHD deals.
 """
 )
 
