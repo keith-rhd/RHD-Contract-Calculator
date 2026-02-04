@@ -23,15 +23,6 @@ def normalize_status(s: str) -> str:
         return "cut"
     return s
 
-def effective_price_row(row) -> float:
-    amended = row.get("Amended Price", None)
-    contract = row.get("Contract Price", None)
-    if pd.notna(amended):
-        return float(amended)
-    if pd.notna(contract):
-        return float(contract)
-    return float("nan")
-
 def dollars(x):
     if x is None or (isinstance(x, float) and math.isnan(x)):
         return "—"
@@ -82,6 +73,18 @@ def load_data_from_google_sheet(sheet_url: str) -> pd.DataFrame:
     csv_url = google_sheet_to_csv_url(sheet_url)
     # If sharing is not enabled, this will error (403/404)
     return pd.read_csv(csv_url)
+
+def clean_money_series(s: pd.Series) -> pd.Series:
+    """
+    Convert Google Sheets currency-formatted strings like "$175,000" or "$290,000.00" to floats.
+    Blanks / non-numeric values become NaN.
+    """
+    return pd.to_numeric(
+        s.astype(str)
+        .str.replace(r"[\$,]", "", regex=True)   # remove $ and commas
+        .str.replace(r"\s+", "", regex=True),    # remove whitespace
+        errors="coerce",
+    )
 
 def build_bins(df_county: pd.DataFrame, bin_size: int, min_bin_n: int) -> pd.DataFrame:
     """
@@ -194,15 +197,26 @@ if missing:
     st.error(f"Your sheet is missing these required columns: {missing}")
     st.stop()
 
-# Prep dataframe
+# -----------------------------
+# Prep dataframe (IMPORTANT FIX)
+# -----------------------------
 df = df_raw.copy()
+
+# Normalize status and filter to Sold / Cut Loose only
 df["status_norm"] = df["Status"].apply(normalize_status)
 df = df[df["status_norm"].isin(["sold", "cut"])].copy()
 
-df["effective_price"] = df.apply(effective_price_row, axis=1)
-df["effective_price"] = pd.to_numeric(df["effective_price"], errors="coerce")
+# Clean currency columns coming from Google Sheets
+df["Contract Price"] = clean_money_series(df["Contract Price"])
+df["Amended Price"] = clean_money_series(df["Amended Price"])
+
+# Effective price = amended if present else contract
+df["effective_price"] = df["Amended Price"].fillna(df["Contract Price"])
+
+# Drop rows without usable effective price
 df = df.dropna(subset=["effective_price"])
 
+# Flags
 df["is_cut"] = (df["status_norm"] == "cut").astype(int)
 df["is_sold"] = (df["status_norm"] == "sold").astype(int)
 
@@ -250,11 +264,17 @@ if not math.isnan(avg_sold):
 
 if line_80 is not None:
     t80 = cdf[cdf["effective_price"] >= line_80]
-    reason.append(f"~80% cut cliff around: {dollars(line_80)} (Deals ≥ line: {len(t80)}, cut rate: {(t80['is_cut'].mean()*100):.0f}%)")
+    reason.append(
+        f"~80% cut cliff around: {dollars(line_80)} "
+        f"(Deals ≥ line: {len(t80)}, cut rate: {(t80['is_cut'].mean()*100):.0f}%)"
+    )
 
 if line_90 is not None:
     t90 = cdf[cdf["effective_price"] >= line_90]
-    reason.append(f"~90% cut cliff around: {dollars(line_90)} (Deals ≥ line: {len(t90)}, cut rate: {(t90['is_cut'].mean()*100):.0f}%)")
+    reason.append(
+        f"~90% cut cliff around: {dollars(line_90)} "
+        f"(Deals ≥ line: {len(t90)}, cut rate: {(t90['is_cut'].mean()*100):.0f}%)"
+    )
 
 # Recommendation logic
 if line_90 is not None and input_price >= line_90:
