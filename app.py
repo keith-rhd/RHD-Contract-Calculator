@@ -167,6 +167,7 @@ st.title("✅ Should We Contract This? — RHD")
 st.markdown(
     """
 This app pulls directly from every sold or cut RHD deal and outputs **Green / Yellow / Red**.
+"""
 )
 
 # Quick refresh button
